@@ -6,14 +6,51 @@ import cv2
 from PIL import Image
 import io
 
-# Initialize EasyOCR Reader
-reader = easyocr.Reader(['en'], gpu=False)
-
 st.set_page_config(page_title="Picklist OCR App", layout="wide")
 st.title("📦 Picklist OCR App")
-st.caption("Capture or upload a picklist photo. Detect handwritten ✓/✗ and quantities, then download Excel.")
+st.caption("Upload or capture a picklist photo. Extract Item Numbers, Qty Ordered, and Qty Picked.")
 
-# Upload or capture image
+# Load EasyOCR reader
+reader = easyocr.Reader(['en'], gpu=False)
+
+# Function to process the image
+def process_image(img):
+    img_np = np.array(img.convert('RGB'))
+    gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
+
+    # OCR
+    result = reader.readtext(gray, detail=1)
+
+    # Extract text
+    extracted_text = [res[1] for res in result]
+    
+    # Build DataFrame logic
+    data = []
+    for i, text in enumerate(extracted_text):
+        if text.isdigit() and len(text) == 6:  # likely Item Number
+            try:
+                qty_ordered = int(extracted_text[i+4])  # Sum of Quantity
+                actual_collected = extracted_text[i+5]
+                # Analyze actual_collected
+                if '✓' in actual_collected:
+                    qty_picked = qty_ordered
+                elif '✗' in actual_collected:
+                    qty_picked = 0
+                else:
+                    try:
+                        qty_picked = int(''.join(filter(str.isdigit, actual_collected)))
+                    except:
+                        qty_picked = 0
+                data.append({
+                    "Item Number": text,
+                    "Qty Ordered": qty_ordered,
+                    "Qty Picked": qty_picked
+                })
+            except:
+                continue
+    return pd.DataFrame(data)
+
+# Upload or capture
 option = st.radio("📸 Capture or 📂 Upload Pick List", ("Capture picklist using mobile camera", "Upload picklist photo"))
 
 if option == "Capture picklist using mobile camera":
@@ -21,67 +58,24 @@ if option == "Capture picklist using mobile camera":
 else:
     img_file = st.file_uploader("Or upload picklist photo", type=["jpg", "jpeg", "png"])
 
-if img_file is not None:
-    st.image(img_file, caption="Selected Picklist", use_container_width=True)
-    
-    image = Image.open(img_file).convert("RGB")
-    # Convert to OpenCV format
-    open_cv_image = np.array(image)
-    open_cv_image = cv2.cvtColor(open_cv_image, cv2.COLOR_RGB2BGR)
-    
-    # Preprocess image for better OCR
-    gray = cv2.cvtColor(open_cv_image, cv2.COLOR_BGR2GRAY)
-    _, thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY_INV)
+if img_file:
+    st.image(img_file, caption="Uploaded Picklist", use_container_width=True)
+    img = Image.open(img_file)
 
-    # OCR with EasyOCR
-    results = reader.readtext(thresh, detail=0)
+    df = process_image(img)
 
-    if not results:
-        st.error("No text detected. Please try a clearer image.")
+    if df.empty:
+        st.error("Could not detect any rows. Try uploading a clearer image.")
     else:
-        st.success("Text detected successfully!")
-        detected_text = "\n".join(results)
-        st.text_area("Detected Text", detected_text, height=300)
-
-        # Parse text to find item codes and quantities
-        data = []
-        lines = detected_text.split("\n")
-        for line in lines:
-            parts = line.split()
-            if len(parts) >= 2:
-                item_code = parts[0]
-                qty_ordered = parts[1]
-                
-                qty_picked = 0  # Default: nothing picked
-
-                # Look for tick or cross or handwritten quantity
-                for part in parts[2:]:
-                    cleaned = part.strip().lower()
-                    if cleaned in ["✓", "✔", "tick"]:  # tick detected
-                        qty_picked = qty_ordered
-                        break
-                    elif cleaned in ["✗", "x", "cross"]:  # cross detected
-                        qty_picked = 0
-                        break
-                    elif cleaned.isdigit():  # handwritten quantity
-                        qty_picked = cleaned
-                        break
-
-                data.append({
-                    "Item Code": item_code,
-                    "Qty Ordered": qty_ordered,
-                    "Qty Picked": qty_picked
-                })
-
-        df = pd.DataFrame(data)
+        st.success("✅ Data extracted successfully!")
         st.dataframe(df, use_container_width=True)
 
         # Download Excel
-        excel_bytes = io.BytesIO()
-        df.to_excel(excel_bytes, index=False)
+        excel_io = io.BytesIO()
+        df.to_excel(excel_io, index=False)
         st.download_button(
             "📥 Download Excel",
-            data=excel_bytes.getvalue(),
+            data=excel_io.getvalue(),
             file_name="picklist.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
